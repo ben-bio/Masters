@@ -1,0 +1,174 @@
+# -*- coding: utf-8 -*-
+
+'''
+code by Ben Haworth - Master's student in the Lukacs Lab
+coded in Python
+14/02/2023
+
+'''
+# importing all 
+
+from tkinter import filedialog
+from cellpose import models, io, utils
+import os
+import imagej
+import scyjava
+from scyjava import jimport
+from jpype import JArray, JInt
+import sys
+import pandas as pd
+
+def dosplit_sub():
+    split_subtract = """
+    @File image
+    open(image);
+    sliceNo = nSlices;
+    if (nSlices % 2 == 0) {
+    } else {
+        sliceNo = sliceNo - 1;
+    };
+
+    image_filepath = split(image, "\\\\");
+
+    image_name = image_filepath[lengthOf(image_filepath)-1];
+
+    run("Make Substack...", "slices=1-" + sliceNo + "-2");
+    selectWindow(image_name);
+    run("Make Substack...", "slices=2-" + sliceNo + "-2");
+    selectWindow(image_name);
+    close();
+    image_list = getList("image.titles");
+    selectWindow(image_list[0]);
+    run("Subtract Background...", "rolling=50 sliding stack");
+    selectWindow(image_list[1]);
+    run("Subtract Background...", "rolling=50 sliding stack");
+
+    run("Z Project...", "projection=[Max Intensity]");
+    saveAs("Tiff", getDir("file") + "MAX_Substack_340.tif");
+    """
+
+    split_subtract_args = {'image':image}
+    
+    ij.py.run_macro(split_subtract, split_subtract_args)
+
+def docellpose():
+    
+    model = models.Cellpose(gpu=True, model_type='cyto')
+
+    #print("Enter the path of your file")
+    image = io.imread(image_path)
+
+    # carries out the image analysis with the defined model
+    masks, flows, styles, diams = model.eval(image, diameter=None, channels=[0,0])
+
+    # saves the ROIs generated to a txt file for imagej
+    base = os.path.splitext(image_path)[0]
+    outlines =  utils.outlines_list(masks)
+    io.outlines_to_text(base, outlines)
+
+def ROIconvertor():
+    # edited cellpose code v
+    RM = ij.RoiManager()
+    rm = RM.getRoiManager()
+    imp = ij.WindowManager.getCurrentImage()
+
+    textfile = open(txtfd, "r")
+    for line in textfile:
+        xy = list(map(int, line.rstrip().split(",")))
+        X = xy[::2]
+        xpoints_int = JArray(JInt)(X)
+        Y = xy[1::2]
+        ypoints_int = JArray(JInt)(Y)
+        new_polyRoi = polyRoi(xpoints_int, ypoints_int, len(X), int(roi.POLYGON))
+        imp.setRoi(new_polyRoi)
+        # IJ.run(imp, "Convex Hull", "")
+        roi1 = imp.getRoi()
+        print(roi1)
+        rm.addRoi(roi1)
+    textfile.close()
+
+
+    rm.runCommand("Associate", "true")
+
+    rm.runCommand("Show All with labels")
+    #edited cell pose code ^
+
+
+def domeasure():
+    measure1 = """
+    //close average substack
+    //selectWindow("MAX_Substack.tif");
+    //close();
+    // need to get slice number again for window selection later
+    image_list = getList("image.titles");
+    selectWindow(image_list[0]);
+    """
+    ij.py.run_macro(measure1)
+
+    ROIconvertor()
+
+    measure2 = '''
+    roiManager("Multi Measure");
+    run("Set Measurements...", "mean redirect=None decimal=3");
+    saveAs("Results", getDir("file") + "340_intensities.csv");
+    image_list = getList("image.titles");
+    close();
+    run("Clear Results");
+    selectWindow(image_list[1]);
+    roiManager("Show None");
+    roiManager("Show All");
+    roiManager("Multi Measure");
+    run("Set Measurements...", "mean redirect=None decimal=3");
+    saveAs("Results", getDir("file") + "380_intensities.csv");
+    '''
+    ij.py.run_macro(measure2)
+
+# sets up imagej to run with Fiji modules and opens interactive interface which will run python while you watch
+scyjava.config.add_option('-Xmx12g')
+ij = imagej.init('sc.fiji:fiji', mode='interactive')
+#print(f"ImageJ2 version: {ij.getVersion()}")
+ij.ui().showUI()
+
+polyRoi = jimport('ij.gui.PolygonRoi')
+roi = jimport('ij.gui.Roi')
+
+image = filedialog.askopenfilename(initialdir = "C:/Users/", 
+                                    filetypes = (("Image files", "*.tif"), ("All files", "*.*")))
+
+image_split = image.rsplit('/', 1)[0]
+image_path = (image_split + "/MAX_Substack_340.tif")
+txtfd = (image_split + "/MAX_Substack_340_cp_outlines.txt")
+
+if image:
+    dosplit_sub()
+    docellpose()
+    domeasure()
+else:
+    sys.exit()
+
+# now going to import the csv files containing imaging means
+
+inten340 = pd.read_csv(image_split + '/340_intensities.csv')
+inten380 = pd.read_csv(image_split + '/380_intensities.csv')
+
+# returns rows and columns as a tuple but need to convert to integer 
+rows, cols = inten340.shape
+rows = int(rows)
+cols = int(cols)
+divinten = pd.DataFrame(index=range(rows), columns=range(cols))
+
+for i in range(cols):
+    for j in range(rows):
+        divinten.iloc[j, i] = inten340.iat[j, i]/inten380.iat[j, i]
+    norm = divinten.iloc[0, i]
+    for k in range(rows):
+        divinten.iloc[k, i] = (divinten.iloc[k, i]-norm)/norm
+
+divinten = divinten.drop(0, axis=1)
+
+divinten.to_csv(image_split + "/normalised_ratio.csv")
+print(divinten) 
+
+rows, cols = divinten.shape
+rows = int(rows)
+cols = int(cols)
